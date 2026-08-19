@@ -48,6 +48,60 @@ curl http://127.0.0.1:8080/health
 
 当前已验证状态：`healthy`。
 
+## Pi Coding Agent
+
+Pi 已在 `~/.pi/agent/models.json` 中配置 `mlx-local` provider，并在 `~/.pi/agent/settings.json` 中设为默认：
+
+```text
+Provider: mlx-local
+Model: ./models/Qwen3.8-27B-Uncensored-MLX/8-bit
+Thinking: supported
+Images: supported
+Context: 262144
+Max output: 32768
+```
+
+直接启动 Pi 即可使用本地模型：
+
+```bash
+cd qwen3.8
+pi
+```
+
+检查模型是否已注册：
+
+```bash
+pi --list-models mlx-local
+```
+
+非交互测试：
+
+```bash
+pi --thinking off --no-tools --no-session -p '只回答 PI_OK'
+```
+
+原有 `ds4` provider 仍保留，可在 Pi 的 `/model` 选择器中切换。
+
+## 自动启动
+
+MLX 服务由以下 LaunchAgent 管理：
+
+```text
+~/Library/LaunchAgents/ai.orcarouter.qwen38-mlx.plist
+```
+
+它会在用户登录后自动启动，并在异常退出时重启。查看状态：
+
+```bash
+launchctl print gui/$(id -u)/ai.orcarouter.qwen38-mlx
+```
+
+重启服务：
+
+```bash
+launchctl kickstart -k gui/$(id -u)/ai.orcarouter.qwen38-mlx
+```
+
 ## 注意事项
 
 请求中的 `model` 必须与上面的 Model ID 完全一致。该服务支持动态加载模型；填写其他名称可能导致当前模型被卸载，并触发本地查找或 Hugging Face 下载。

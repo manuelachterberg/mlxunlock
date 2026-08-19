@@ -290,21 +290,56 @@ Peak memory：34.01GB
 
 ## 7. 停止和重启
 
-前台运行时，直接在服务终端按 `Ctrl+C`。
+### 7.1 前台手工启动
 
-也可以先查找监听 8080 端口的 PID：
+若按第 6 节以前台方式运行，直接在服务终端按 `Ctrl+C`。
 
-```bash
-lsof -nP -iTCP:8080 -sTCP:LISTEN
+### 7.2 LaunchAgent 自动启动
+
+当前实际部署使用 macOS LaunchAgent，在用户登录后自动启动，并在进程异常退出时自动拉起。
+
+配置文件：
+
+```text
+~/Library/LaunchAgents/ai.orcarouter.qwen38-mlx.plist
 ```
 
-然后停止对应进程：
+查看状态：
 
 ```bash
-kill <PID>
+launchctl print gui/$(id -u)/ai.orcarouter.qwen38-mlx
 ```
 
-重新启动时重复第 6 节命令即可，不需要重新下载模型。
+重启服务：
+
+```bash
+launchctl kickstart -k gui/$(id -u)/ai.orcarouter.qwen38-mlx
+```
+
+停止并取消本次登录会话中的自动启动：
+
+```bash
+launchctl bootout \
+  gui/$(id -u) \
+  ~/Library/LaunchAgents/ai.orcarouter.qwen38-mlx.plist
+```
+
+重新载入：
+
+```bash
+launchctl bootstrap \
+  gui/$(id -u) \
+  ~/Library/LaunchAgents/ai.orcarouter.qwen38-mlx.plist
+```
+
+日志位于：
+
+```text
+logs/qwen38-mlx.out.log
+logs/qwen38-mlx.err.log
+```
+
+由于配置了 `KeepAlive`，直接 `kill` 服务进程只会触发自动重启；需要停止时应使用 `launchctl bootout`。
 
 ## 8. 已知问题与排错
 

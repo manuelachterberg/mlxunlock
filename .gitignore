@@ -1,6 +1,7 @@
 .DS_Store
 .venv/
 models/
+logs/
 __pycache__/
 *.py[cod]
 .env
