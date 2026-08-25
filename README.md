@@ -16,7 +16,7 @@ Built for a locally discovered MLX primary model and fallback model, configurabl
 
 Watch the demo on YouTube:
 
-- https://www.youtube.com/watch?v=YOUR_VIDEO_ID
+- https://www.youtube.com/watch?v=zgPQV-Zi7ok
 
 ---
 
