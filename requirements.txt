@@ -1,0 +1,6 @@
+mlx>=0.32.1
+mlx-lm>=0.31.3
+huggingface_hub>=0.28.0
+psutil>=6.0.0
+rich>=13.0.0
+terminaltexteffects>=0.15.0

@@ -4,15 +4,15 @@
 
 | 配置项 | 值 |
 | --- | --- |
-| 监听地址 | `0.0.0.0:8080` |
-| Base URL | `http://127.0.0.1:8080/v1` |
-| 当前局域网 Base URL | `http://10.43.0.147:8080/v1` |
-| Chat Completions | `http://127.0.0.1:8080/v1/chat/completions` |
-| Models | `http://127.0.0.1:8080/v1/models` |
+| 监听地址 | `0.0.0.0:8082` (Router) |
+| Base URL | `http://127.0.0.1:8082/v1` |
+| 当前局域网 Base URL | `http://10.43.0.147:8082/v1` |
+| Chat Completions | `http://127.0.0.1:8082/v1/chat/completions` |
+| Models | `http://127.0.0.1:8082/v1/models` |
 | Health | `http://127.0.0.1:8080/health` |
-| Model ID | `./models/Qwen3.8-27B-Uncensored-MLX/8-bit` |
+| Model ID | `<primary-model-path>` |
 | API Key | 未启用；客户端强制要求时填写任意非空占位值，例如 `local` |
-| 上下文上限 | `262144` tokens |
+| 上下文上限 | `16384` tokens (gesamt: Prompt + Antwort) |
 
 本机继续使用 `127.0.0.1`。其他局域网设备使用 Mac 的局域网 IP；当前为 `10.43.0.147`，该地址可能在重连网络或 DHCP 租约更新后改变。
 
@@ -21,9 +21,9 @@
 ## 环境变量
 
 ```bash
-export OPENAI_BASE_URL='http://127.0.0.1:8080/v1'
+export OPENAI_BASE_URL='http://127.0.0.1:8082/v1'
 export OPENAI_API_KEY='local'
-export OPENAI_MODEL='./models/Qwen3.8-27B-Uncensored-MLX/8-bit'
+export OPENAI_MODEL='<primary-model-path>'
 ```
 
 ## 请求示例
@@ -32,7 +32,7 @@ export OPENAI_MODEL='./models/Qwen3.8-27B-Uncensored-MLX/8-bit'
 curl http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "./models/Qwen3.8-27B-Uncensored-MLX/8-bit",
+    "model": "<primary-model-path>",
     "messages": [
       {"role": "user", "content": "你好，请简单介绍一下自己"}
     ],
@@ -58,7 +58,7 @@ Pi 已在 `~/.pi/agent/models.json` 中配置 `mlx-local` provider，并在 `~/.
 
 ```text
 Provider: mlx-local
-Model: ./models/Qwen3.8-27B-Uncensored-MLX/8-bit
+Model: <primary-model-path>
 Thinking: supported
 Images: supported
 Context: 262144

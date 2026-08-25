@@ -1,426 +1,208 @@
-# Qwen3.8-27B-Uncensored-MLX 本地部署调查与操作手册
+# MLX Auto-Router Dashboard
 
-本文记录 `orcarouter/Qwen3.8-27B-Uncensored-MLX` 在当前 Mac Studio 上的可运行性调查、实际部署步骤、测试结果和已知限制。记录日期：2026-08-19（Asia/Tokyo）。
+A local LLM router dashboard for macOS / Apple Silicon. It runs two `mlx_lm.server` instances side-by-side — a large primary model for quality and a smaller fallback model for speed — and automatically routes OpenAI-compatible API requests between them.
 
-## 1. 结论
+Built for a locally discovered MLX primary model and fallback model, configurable for any MLX-compatible model.
 
-- 当前机器可以轻松运行该模型的最高质量版本 `8-bit`，并已实际加载、生成文本和通过 OpenAI 兼容 API 验证。
-- 本仓库最高只提供 8-bit 量化，因此这里的“满血”是指仓库内最高精度，并非 BF16 原始精度。
-- 模型的原生、已验证配置上下文为 **262,144 tokens**。官方基础模型说明可以通过 YaRN 外推至 1,000,000 tokens，但本次 MLX 部署没有验证 1M，生产使用应把 262,144 当作可靠上限。
-- 当前服务监听 `0.0.0.0:8080`。本机通过 `http://127.0.0.1:8080` 访问，局域网设备通过 Mac 的局域网 IP 访问。
-- 实测短上下文生成速度约为 **21–25 tokens/s**，峰值内存约 **34GB**。
-- 配置文件声明模型带一层 MTP，但下载到的权重中没有 `mtp.*` 张量，因此无法启用原生 MTP 推测解码。普通推理、视觉输入和模型质量不受此问题影响。
+---
 
-## 2. 当前硬件与软件
+## What It Does
 
-### 硬件
+- **Starts both servers automatically**
+  - Primary model on port `8080`
+  - Fallback model on port `8081`
+- **Proxy / OpenAI-compatible router** on port `8082`
+- **Auto-routing** based on prompt length, RAM pressure, and primary health
+- **Manual override** with a single key press
+- **Live dashboard** with system stats, routing info, token throughput, and log stream
 
-| 项目 | 配置 |
-| --- | --- |
-| 机型 | Mac Studio `Mac15,14` |
-| 芯片 | Apple M3 Ultra |
-| CPU | 32 核：24 性能核 + 8 能效核 |
-| GPU | 80 核 |
-| 统一内存 | 512GB |
-| 系统 | macOS 26.5.2，Build 25F84 |
-| 部署后可用磁盘 | 约 126GiB |
+---
 
-### 软件
-
-| 软件 | 版本 |
-| --- | --- |
-| Python | 3.14.6 |
-| MLX | 0.32.1 |
-| mlx-vlm | 0.6.15 |
-| huggingface-hub | 1.28.0 |
-| Jinja2 | 3.1.6 |
-
-Python 环境位于仓库内：
+## Architecture
 
 ```text
-.venv/
+┌─────────────┐     ┌─────────────┐     ┌─────────────────┐
+│   Primary   │     │   Fallback  │     │     Proxy       │
+│ 27B / 8080  │     │  9B / 8081  │     │   8082 /v1      │
+└──────┬──────┘     └──────┬──────┘     └────────┬────────┘
+       │                   │                    │
+       └───────────────────┴────────────────────┘
+                                ▲
+                                │
+                         OpenWebUI / API client
 ```
 
-模型位于仓库内（不纳入 Git）：
+---
 
-```text
-models/Qwen3.8-27B-Uncensored-MLX/8-bit/
-```
+## Requirements
 
-## 3. 模型调查结果
+- macOS with Apple Silicon
+- Python 3.10+
+- `mlx-lm` installed
+- `psutil` and `rich` installed
+- Enough unified memory to run both discovered models simultaneously
+  - 27B 4-bit: ~24–35 GB
+  - 9B 4-bit: ~6–10 GB
+  - The startup scan calculates conservative suggestions from available RAM and model specs
 
-该模型是 Qwen3.8-27B 的 abliterated（移除拒答方向）版本，使用 MLX affine 量化，group size 为 64。视觉塔、归一化层和部分卷积层保留 BF16，语言模型线性权重被量化。
+---
 
-仓库提供以下版本：
-
-| 子目录 | 权重大小 | 说明 |
-| --- | ---: | --- |
-| `2-bit/` | 约 8.69GiB | 质量严重下降，不建议实际使用 |
-| `4-bit/` | 约 14.95GiB | 默认版本，速度和质量平衡 |
-| `6-bit/` | 约 21.21GiB | 较高质量 |
-| `8-bit/` | 约 27.48GiB | 仓库内最高质量，本次部署版本 |
-
-仓库根目录还复制了一份 4-bit 权重。若直接下载整个仓库，会同时下载全部量化版本和重复的根目录 4-bit，因此应使用 `--include "8-bit/*"` 只取需要的版本。
-
-关键模型配置：
-
-| 配置 | 值 |
-| --- | ---: |
-| 架构 | `Qwen3_5ForConditionalGeneration` |
-| 总层数 | 64 |
-| 隐藏维度 | 5120 |
-| 全注意力间隔 | 每 4 层一次 |
-| 全注意力层 | 16 |
-| 线性注意力层 | 48 |
-| KV heads | 4 |
-| Head dimension | 256 |
-| 原生上下文 | 262,144 tokens |
-
-按 BF16 KV cache 粗略估算，16 个全注意力层在 262,144 tokens 时需要约 16GiB 的增长型 KV cache：
-
-```text
-16 layers × 2(K/V) × 4 KV heads × 256 dim × 2 bytes × 262,144 tokens
-≈ 16GiB
-```
-
-再加约 27.5GiB 权重和运行时开销，仍远低于 512GB 统一内存。容量不是瓶颈；超长 prompt 的预填充时间和长上下文解码速度才是主要限制。
-
-## 4. 从零部署
-
-以下命令都在项目目录执行：
-
-```bash
-cd qwen3.8
-```
-
-### 4.1 接受仓库条款并登录 Hugging Face
-
-该仓库为 gated repository。先在浏览器打开模型页面、接受条款并允许共享联系信息：
-
-<https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-MLX>
-
-然后登录 CLI：
-
-```bash
-hf auth login
-hf auth whoami
-```
-
-### 4.2 创建独立 Python 环境
+## Installation
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 
-python -m pip install -U pip
-python -m pip install -U \
-  "mlx>=0.32" \
-  "mlx-vlm>=0.6.13" \
-  huggingface_hub \
-  jinja2
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
-`jinja2` 需要显式安装。本次首次运行时，`mlx-vlm` 已安装但缺少该运行时依赖，导致聊天模板编译失败。
+At startup the dashboard scans `MODEL_ROOT` (default `./models`) for local MLX model directories. If none are found, an interactive terminal wizard offers to download the default Qwen3.8-27B and Qwen3.8-9B MLX models or accepts custom Hugging Face model IDs for the primary and fallback models. Set `PRIMARY_MODEL_PATH` and `FALLBACK_MODEL_PATH` to override the automatic selection.
 
-### 4.3 只下载 8-bit 版本
+---
 
-```bash
-mkdir -p models
+## Configuration
 
-hf download orcarouter/Qwen3.8-27B-Uncensored-MLX \
-  --include "8-bit/*" \
-  --local-dir ./models/Qwen3.8-27B-Uncensored-MLX
+Press `K` in the running dashboard to open the configuration TUI. Changes apply after restarting the affected servers.
+The selected values are persisted in `router_config.json` and loaded on the next start. Model specifications are rescanned when the configured model paths change.
+
+```python
+MODEL_ROOT = "./models"
+PRIMARY_PORT = 8080
+PROXY_PORT = 8082
+HOST = "0.0.0.0"
+
+FALLBACK_TYPE = "mlx_lm"
+FALLBACK_HOST = "localhost"
+FALLBACK_PORT = 8081
+FALLBACK_MEMORY_LIMIT = "derived by startup scan"
+AUTO_START_FALLBACK = True
+
+REASONING_EFFORT_27B = "low"
+TOKEN_LIMIT_27B = "derived by startup scan"
 ```
 
-下载完成后应存在 6 个权重分片：
+| Setting | Description |
+| --- | --- |
+| `MODEL_ROOT` | Directory scanned for local MLX models |
+| `PRIMARY_MODEL_PATH` | Optional override for the automatically selected primary model |
+| `FALLBACK_MODEL_PATH` | Optional override for the automatically selected fallback model |
+| `FALLBACK_MEMORY_LIMIT` | Metal memory limit for the fallback server in bytes |
+| `REASONING_EFFORT_27B` | Controls primary thinking depth (`xhigh`, `medium`, or `low`) |
+| `TOKEN_LIMIT_27B` | Token threshold above which requests go to fallback |
+| `SWAP_LIMIT_27B` | SWAP threshold in GB above which requests go to fallback |
 
-```bash
-find models/Qwen3.8-27B-Uncensored-MLX/8-bit \
-  -maxdepth 1 \
-  -name 'model-*.safetensors' \
-  -print | sort
-```
+### Controlling thinking mode on the 27B model
 
-检查量化和上下文配置：
+Qwen3.8-27B defaults to `xhigh` reasoning, which produces very long internal thinking traces. The router automatically injects the chosen `reasoning_effort` into every `/v1/chat/completions` request sent to the primary model via `chat_template_kwargs`. Set `REASONING_EFFORT_27B = "low"` for brief reasoning, `"medium"` for moderate reasoning, or `"xhigh"` to match the model default. Set it to `None` to leave the model default untouched.
 
-```bash
-jq '{
-  model_type,
-  architectures,
-  quantization,
-  max_position_embeddings: .text_config.max_position_embeddings,
-  num_hidden_layers: .text_config.num_hidden_layers,
-  full_attention_interval: .text_config.full_attention_interval
-}' models/Qwen3.8-27B-Uncensored-MLX/8-bit/config.json
-```
+---
 
-预期关键结果：
-
-```json
-{
-  "model_type": "qwen3_5",
-  "architectures": ["Qwen3_5ForConditionalGeneration"],
-  "quantization": {
-    "bits": 8,
-    "group_size": 64,
-    "mode": "affine"
-  },
-  "max_position_embeddings": 262144,
-  "num_hidden_layers": 64,
-  "full_attention_interval": 4
-}
-```
-
-## 5. 本地推理测试
-
-运行一次关闭思考模式的短测试：
+## Usage
 
 ```bash
 source .venv/bin/activate
-
-python -m mlx_vlm generate \
-  --model ./models/Qwen3.8-27B-Uncensored-MLX/8-bit \
-  --prompt '只回答一句话：本地模型启动成功。' \
-  --max-tokens 64 \
-  --temperature 0 \
-  --thinking-mode disabled \
-  --verbose
+python mlx_dashboard.py
 ```
 
-本次实测结果：
+The dashboard will:
+
+1. Start the 27B primary server on port `8080`
+2. Start the 9B fallback server on port `8081`
+3. Start the proxy router on port `8082`
+
+Point your OpenAI-compatible client (e.g. OpenWebUI) at:
 
 ```text
-输出：本地模型启动成功。
-Prompt：21 tokens，10.492 tokens/s
-Generation：6 tokens，25.453 tokens/s
-Peak memory：34.028GB
+http://<your-mac-ip>:8082/v1
 ```
 
-这是很短的单次测试，只适合作为加载成功和速度量级参考。实际速度会随上下文长度、输出长度、思考模式、温度和并发数变化。
+Use any non-empty string as the API key, for example `dummy`.
 
-## 6. 启动 OpenAI 兼容服务
+---
 
-```bash
-cd qwen3.8
-source .venv/bin/activate
+## Dashboard Hotkeys
 
-python -m mlx_vlm server \
-  --model ./models/Qwen3.8-27B-Uncensored-MLX/8-bit \
-  --host 0.0.0.0 \
-  --port 8080
-```
+| Key | Action |
+| --- | --- |
+| `Q` | Quit |
+| `R` | Restart primary (27B) server |
+| `F` | Restart fallback server |
+| `S` | Toggle forced fallback / auto routing |
+| `C` | Clear logs and history |
+| `P` | Save stats to file |
 
-保持此终端窗口运行。服务地址：
+---
 
-```text
-http://127.0.0.1:8080
-```
+## Routing Logic
 
-OpenAI 客户端的 Base URL：
+| Condition | Router Decision | Dashboard Display |
+| --- | --- | --- |
+| Short prompt, Primary healthy | → Primary | ▶ PRIMARY |
+| Prompt > `TOKEN_LIMIT_27B` tokens | → Fallback | ▶ FALLBACK (5000t > 3000t limit) |
+| SWAP > `SWAP_LIMIT_27B` GB | → Fallback | ▶ FALLBACK (SWAP 6.2GB > 5GB) |
+| 27B crashed / unhealthy | → Fallback | ▶ FALLBACK (27B crashed) |
+| You press `S` | → Fallback | ▶ FALLBACK (FORCED) |
+| No fallback available | → 27B only | 27B (no fallback) |
 
-```text
-http://127.0.0.1:8080/v1
-```
+If the fallback server is offline, all requests are routed to the primary model.
 
-默认没有配置 API key。部分客户端强制要求填写时，可填任意非空占位值，但服务端不会校验它。
+---
 
-### 6.1 健康检查
+## Files
 
-```bash
-curl --silent http://127.0.0.1:8080/health | jq .
-```
+| File | Purpose |
+| --- | --- |
+| `mlx_dashboard.py` | Main dashboard, proxy router, and process manager |
+| `mlx_server_safe_wrapper.py` | Starts the primary 27B `mlx_lm.server` on port 8080 |
+| `mlx_server_fallback_wrapper.py` | Starts the fallback `mlx_lm.server` on port 8081 |
+| `requirements.txt` | Python dependencies |
+| `DASHBOARD.md` | German setup guide |
+| `endpoint.md` | Legacy endpoint notes |
 
-本次健康检查确认：
+---
 
-```json
-{
-  "status": "healthy",
-  "loaded_model": "./models/Qwen3.8-27B-Uncensored-MLX/8-bit",
-  "effective_context_limit": 262144,
-  "continuous_batching_enabled": true,
-  "apc_enabled": false
-}
-```
+## Troubleshooting
 
-### 6.2 查看模型 ID
+### `ModuleNotFoundError: No module named 'mlx_lm'`
 
-```bash
-curl --silent http://127.0.0.1:8080/v1/models | jq .
-```
-
-请求中的 `model` 必须与服务加载的模型 ID 完全一致：
-
-```text
-./models/Qwen3.8-27B-Uncensored-MLX/8-bit
-```
-
-不要随意填 `local-qwen3.8-27b` 等别名。该服务器支持动态模型切换；如果收到不同的模型 ID，它会卸载当前模型并尝试从本地路径或 Hugging Face 加载新 ID。
-
-### 6.3 Chat Completions 调用
-
-```bash
-curl http://127.0.0.1:8080/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "./models/Qwen3.8-27B-Uncensored-MLX/8-bit",
-    "messages": [
-      {"role": "user", "content": "你好，请简单介绍一下自己"}
-    ],
-    "temperature": 0.7,
-    "max_tokens": 512,
-    "enable_thinking": false
-  }'
-```
-
-启用思考模式：
-
-```json
-"enable_thinking": true
-```
-
-API 端到端测试结果：
-
-```text
-输入：只回答：API 正常
-输出：API 正常
-Prompt：18 tokens，59.92 tokens/s
-Generation：4 tokens，21.28 tokens/s
-Peak memory：34.01GB
-```
-
-## 7. 停止和重启
-
-### 7.1 前台手工启动
-
-若按第 6 节以前台方式运行，直接在服务终端按 `Ctrl+C`。
-
-### 7.2 LaunchAgent 自动启动
-
-当前实际部署使用 macOS LaunchAgent，在用户登录后自动启动，并在进程异常退出时自动拉起。
-
-配置文件：
-
-```text
-~/Library/LaunchAgents/ai.orcarouter.qwen38-mlx.plist
-```
-
-查看状态：
-
-```bash
-launchctl print gui/$(id -u)/ai.orcarouter.qwen38-mlx
-```
-
-重启服务：
-
-```bash
-launchctl kickstart -k gui/$(id -u)/ai.orcarouter.qwen38-mlx
-```
-
-停止并取消本次登录会话中的自动启动：
-
-```bash
-launchctl bootout \
-  gui/$(id -u) \
-  ~/Library/LaunchAgents/ai.orcarouter.qwen38-mlx.plist
-```
-
-重新载入：
-
-```bash
-launchctl bootstrap \
-  gui/$(id -u) \
-  ~/Library/LaunchAgents/ai.orcarouter.qwen38-mlx.plist
-```
-
-日志位于：
-
-```text
-logs/qwen38-mlx.out.log
-logs/qwen38-mlx.err.log
-```
-
-由于配置了 `KeepAlive`，直接 `kill` 服务进程只会触发自动重启；需要停止时应使用 `launchctl bootout`。
-
-## 8. 已知问题与排错
-
-### 8.1 下载返回 401 或无权访问
-
-原因通常是尚未在网页接受 gated repository 条款，或 CLI 没有登录。
-
-```bash
-hf auth whoami
-```
-
-若未登录：
-
-```bash
-hf auth login
-```
-
-### 8.2 `apply_chat_template requires jinja2`
-
-安装缺少的依赖：
+Install or upgrade `mlx-lm`:
 
 ```bash
 source .venv/bin/activate
-python -m pip install -U jinja2
+python -m pip install --upgrade mlx-lm
 ```
 
-### 8.3 请求错误模型 ID 后服务尝试联网下载
+### Fallback server fails to start
 
-API 请求的 `model` 应使用：
+- Check that `FALLBACK_MODEL_PATH` is valid and accessible
+- Verify you have enough free disk space and RAM
+- Try starting it manually to see the error:
 
-```text
-./models/Qwen3.8-27B-Uncensored-MLX/8-bit
+```bash
+python -m mlx_lm.server --model PocketAiHub/Qwen3.8-9B-Abliterated-MLX --host 0.0.0.0 --port 8081
 ```
 
-若误填其他 ID，重新用正确 ID 发请求即可；服务器会重新加载本地 8-bit 模型。用 `/health` 确认最终状态。
+### Model downloads are slow
 
-### 8.4 MTP 无法启用
+`mlx_lm.server` caches models in `~/.cache/huggingface/`. You can pre-download with:
 
-模型配置包含：
-
-```json
-"mtp_num_hidden_layers": 1
+```bash
+python -m mlx_lm.server --model PocketAiHub/Qwen3.8-9B-Abliterated-MLX --host 0.0.0.0 --port 8081
 ```
 
-但 `model.safetensors.index.json` 中没有任何 `mtp.*`、`nextn.*` 或额外 `layers.64.*` 权重。运行 mlx-vlm 的 Qwen MTP 分离器会报错：
+Then stop it and start the dashboard.
 
-```text
-ValueError: No mtp.* tensors found
-```
+### OpenWebUI cannot connect
 
-因此当前仓库不能使用原生 MTP 推测解码。这只影响潜在的解码加速，不影响正常输出。不要仅根据配置字段判断 MTP 权重实际存在。
+- Make sure the dashboard is running
+- Use the Mac's LAN IP, not `127.0.0.1`, if OpenWebUI runs on another machine
+- Use any non-empty API key
 
-### 8.5 262K 能装下，但不代表交互速度不变
+---
 
-KV cache 和注意力计算会随上下文增长。机器内存足够装下完整 262K 窗口，但长 prompt 的首 token 等待时间可能达到分钟级，后续生成速度也会下降。建议按实际任务逐级测试 32K、64K、128K，再使用完整 262K。
+## Credits
 
-### 8.6 1M 上下文
-
-官方基础模型称可通过 YaRN 外推到 1M，但这不是模型原生窗口。本次没有修改 MLX 配置、没有验证 MLX 下的 YaRN 质量，也没有进行 1M 压力测试。因此当前部署的支持边界仍是 262,144 tokens。
-
-### 8.7 KV cache 量化与 APC
-
-本次保持默认配置：
-
-- KV cache 未量化；512GB 内存下没有必要为节省容量承担额外兼容性和性能风险。
-- Continuous batching 已启用。
-- APC 自动前缀缓存未启用。
-
-如需面向长前缀、多轮代理或并发服务进一步优化，应单独做正确性、命中率、吞吐和内存对照测试，避免直接修改生产参数。
-
-## 9. 安全注意事项
-
-该模型经过 refusal removal，缺少可靠的内置安全护栏。当前服务绑定 `0.0.0.0`，同一网络中的设备可以直接访问 8080 端口，并且服务端尚未启用 API key。
-
-不要通过路由器端口转发、UPnP 或公网隧道将其暴露到互联网。对于不完全可信的局域网，也应配置服务端 API key、macOS 防火墙、访问控制和独立内容安全层。
-
-## 10. 参考资料
-
-- 目标模型：<https://huggingface.co/orcarouter/Qwen3.8-27B-Uncensored-MLX>
-- 官方基础模型：<https://huggingface.co/Qwen/Qwen3.8-27B>
-- 官方模型配置：<https://huggingface.co/Qwen/Qwen3.8-27B/blob/main/config.json>
-- mlx-vlm：<https://github.com/Blaizzy/mlx-vlm>
-- mlx-lm：<https://github.com/ml-explore/mlx-lm>
-- M3 Ultra 长上下文参考测试：<https://github.com/ml-explore/mlx/discussions/3209>
+- Primary model: locally discovered from the configured model directory
+- Fallback model: [`PocketAiHub/Qwen3.8-9B-Abliterated-MLX`](https://huggingface.co/PocketAiHub/Qwen3.8-9B-Abliterated-MLX)
+- Routing and dashboard code: custom, built on top of `mlx-lm`, `psutil`, and `rich`

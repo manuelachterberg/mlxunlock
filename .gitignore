@@ -2,7 +2,10 @@
 .venv/
 models/
 logs/
+*.log
+mlx_stats_*.txt
 __pycache__/
 *.py[cod]
 .env
 .env.*
+restore/
