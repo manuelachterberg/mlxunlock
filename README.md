@@ -1,4 +1,12 @@
-# MLX Auto-Router Dashboard
+# MLX Auto-Router
+
+```text
+▄▀▀▄▀▀▄ █     █    █      ▄▀▀▀▀▄ █    █ ▀▀▀█▀▀▀ ▄▀▀▀▀▄      ▄▀▀▀▀▄ ▄▀▀▀▀▄ █    █ ▀▀▀█▀▀▀ ▄▀▀▀▀ ▄▀▀▀▀▄
+▀  ▀  ▀ ▀     ▀    ▀      ▀    ▀ ▀    ▀    ▀    ▀    ▀      ▀    ▀ ▀    ▀ ▀    ▀    ▀    ▀     ▀    ▀
+█  █  █ █     ▄▀▀▀▀▄      █▀▀▀▀█ █    █    █    █    █      █▀▀▀▀▄ █    █ █    █    █    ▄▀▀▀  █▀▀▀▀▄
+█  ▀  █ █     █    █      █    █ █    █    █    █    █      █    █ █    █ █    █    █    █     █    █
+▀     ▀  ▀▀▀▀ ▀    ▀      ▀    ▀  ▀▀▀▀     ▀     ▀▀▀▀       ▀    ▀  ▀▀▀▀   ▀▀▀▀     ▀     ▀▀▀▀ ▀    ▀
+```
 
 A local LLM router dashboard for macOS / Apple Silicon. It runs two `mlx_lm.server` instances side-by-side — a large primary model for quality and a smaller fallback model for speed — and automatically routes OpenAI-compatible API requests between them.
 
@@ -50,14 +58,10 @@ Built for a locally discovered MLX primary model and fallback model, configurabl
 ## Installation
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+./start.sh
 ```
 
-At startup the dashboard scans `MODEL_ROOT` (default `./models`) for local MLX model directories. If none are found, an interactive terminal wizard offers to download the default Qwen3.8-27B and Qwen3.8-9B MLX models or accepts custom Hugging Face model IDs for the primary and fallback models. Set `PRIMARY_MODEL_PATH` and `FALLBACK_MODEL_PATH` to override the automatic selection.
+`start.sh` creates `.venv` when needed, installs [requirements.txt](requirements.txt), and starts the dashboard. At startup the dashboard scans `MODEL_ROOT` (default `./models`) for local MLX model directories. If none are found, an interactive terminal wizard offers to download the default `mlx-community/Qwen3.5-27B-4bit` and `mlx-community/Qwen3.5-9B-4bit` models or accepts custom Hugging Face model IDs for the primary and fallback models. Set `PRIMARY_MODEL_PATH` and `FALLBACK_MODEL_PATH` to override automatic selection.
 
 ---
 
@@ -94,15 +98,14 @@ TOKEN_LIMIT_27B = "derived by startup scan"
 
 ### Controlling thinking mode on the 27B model
 
-Qwen3.8-27B defaults to `xhigh` reasoning, which produces very long internal thinking traces. The router automatically injects the chosen `reasoning_effort` into every `/v1/chat/completions` request sent to the primary model via `chat_template_kwargs`. Set `REASONING_EFFORT_27B = "low"` for brief reasoning, `"medium"` for moderate reasoning, or `"xhigh"` to match the model default. Set it to `None` to leave the model default untouched.
+Qwen3.5-27B defaults to `xhigh` reasoning, which produces very long internal thinking traces. The router automatically injects the chosen `reasoning_effort` into every `/v1/chat/completions` request sent to the primary model via `chat_template_kwargs`. Set `REASONING_EFFORT_27B = "low"` for brief reasoning, `"medium"` for moderate reasoning, or `"xhigh"` to match the model default. Set it to `None` to leave the model default untouched.
 
 ---
 
 ## Usage
 
 ```bash
-source .venv/bin/activate
-python mlx_dashboard.py
+./start.sh
 ```
 
 The dashboard will:
@@ -180,7 +183,7 @@ python -m pip install --upgrade mlx-lm
 - Try starting it manually to see the error:
 
 ```bash
-python -m mlx_lm.server --model PocketAiHub/Qwen3.8-9B-Abliterated-MLX --host 0.0.0.0 --port 8081
+python -m mlx_lm.server --model mlx-community/Qwen3.5-9B-4bit --host 0.0.0.0 --port 8081
 ```
 
 ### Model downloads are slow
@@ -188,7 +191,7 @@ python -m mlx_lm.server --model PocketAiHub/Qwen3.8-9B-Abliterated-MLX --host 0.
 `mlx_lm.server` caches models in `~/.cache/huggingface/`. You can pre-download with:
 
 ```bash
-python -m mlx_lm.server --model PocketAiHub/Qwen3.8-9B-Abliterated-MLX --host 0.0.0.0 --port 8081
+python -m mlx_lm.server --model mlx-community/Qwen3.5-9B-4bit --host 0.0.0.0 --port 8081
 ```
 
 Then stop it and start the dashboard.
@@ -203,6 +206,6 @@ Then stop it and start the dashboard.
 
 ## Credits
 
-- Primary model: locally discovered from the configured model directory
-- Fallback model: [`PocketAiHub/Qwen3.8-9B-Abliterated-MLX`](https://huggingface.co/PocketAiHub/Qwen3.8-9B-Abliterated-MLX)
+- Default primary model: [`mlx-community/Qwen3.5-27B-4bit`](https://huggingface.co/mlx-community/Qwen3.5-27B-4bit)
+- Default fallback model: [`mlx-community/Qwen3.5-9B-4bit`](https://huggingface.co/mlx-community/Qwen3.5-9B-4bit)
 - Routing and dashboard code: custom, built on top of `mlx-lm`, `psutil`, and `rich`

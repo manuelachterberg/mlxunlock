@@ -48,8 +48,8 @@ AUTO_FALLBACK_HEADROOM = 0.85
 #  CONFIGURATION
 # ═══════════════════════════════════════════════════════════════
 
-DEFAULT_PRIMARY_MODEL_REPO = "PocketAiHub/Qwen3.8-27B-Uncensored-MLX"
-DEFAULT_FALLBACK_MODEL_REPO = "PocketAiHub/Qwen3.8-9B-Abliterated-MLX"
+DEFAULT_PRIMARY_MODEL_REPO = "mlx-community/Qwen3.5-27B-4bit"
+DEFAULT_FALLBACK_MODEL_REPO = "mlx-community/Qwen3.5-9B-4bit"
 
 
 def find_local_model_paths(root: Path) -> list[tuple[int, str]]:
@@ -79,7 +79,7 @@ def run_model_setup_wizard(root: Path) -> None:
 
     console.print("[bold cyan]◈ MLX-MODELL-SETUP ◈[/bold cyan]")
     console.print("Es wurden keine lokalen MLX-Modelle gefunden.")
-    console.print("[1] Qwen3.8-27B + Qwen3.8-9B herunterladen (Standard)")
+    console.print("[1] Qwen3.5-27B + Qwen3.5-9B herunterladen (Standard)")
     console.print("[2] Eigene Hugging-Face-Modell-IDs eingeben")
     choice = console.input("Auswahl [1]: ").strip() or "1"
 
