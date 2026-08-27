@@ -43,7 +43,7 @@ Watch the demo on YouTube:
        └───────────────────┴────────────────────┘
                                 ▲
                                 │
-                         OpenWebUI / API client
+                       OpenAI-compatible client
 ```
 
 ---
@@ -123,7 +123,7 @@ The dashboard will:
 2. Start the 9B fallback server on port `8081`
 3. Start the proxy router on port `8082`
 
-Point your OpenAI-compatible client (e.g. OpenWebUI) at:
+Point your OpenAI-compatible client at:
 
 ```text
 http://<your-mac-ip>:8082/v1
@@ -131,7 +131,7 @@ http://<your-mac-ip>:8082/v1
 
 Use any non-empty string as the API key, for example `dummy`.
 
-Set OpenWebUI's concurrent request limit to `1`. The proxy also serializes chat requests server-side so multiple OpenWebUI requests cannot trigger simultaneous MLX generations.
+Set the client's concurrent request limit to `1`. The proxy also serializes chat requests server-side so multiple requests cannot trigger simultaneous MLX generations.
 
 ---
 
@@ -207,10 +207,10 @@ python -m mlx_lm.server --model mlx-community/Qwen3.5-9B-4bit --host 0.0.0.0 --p
 
 Then stop it and start the dashboard.
 
-### OpenWebUI cannot connect
+### Client cannot connect
 
 - Make sure the dashboard is running
-- Use the Mac's LAN IP, not `127.0.0.1`, if OpenWebUI runs on another machine
+- Use the Mac's LAN IP, not `127.0.0.1`, if the client runs on another machine
 - Use any non-empty API key
 
 ---

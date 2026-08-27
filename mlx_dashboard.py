@@ -2,7 +2,7 @@
 """
 MLX Server Dashboard v11 - Auto-Router Edition
 Routes between 27B (quality) and fallback (speed) based on prompt length.
-Proxy runs on port 8082. OpenWebUI should connect to http://host:8082/v1
+Proxy runs on port 8082. OpenAI-compatible clients should connect to http://host:8082/v1
 """
 
 import subprocess
@@ -1996,7 +1996,7 @@ class MLXDashboard:
         else:
             console.print("[dim]Fallback: " + FALLBACK_TYPE + " on " + FALLBACK_HOST + ":" + str(FALLBACK_PORT) + " (manual)[/dim]")
         console.print()
-        console.print("[bold yellow]IMPORTANT:[/bold yellow] Set OpenWebUI to http://<host>:" + str(PROXY_PORT) + "/v1")
+        console.print("[bold yellow]IMPORTANT:[/bold yellow] Set your API client to http://<host>:" + str(PROXY_PORT) + "/v1")
         console.print()
 
         self.keyboard.start()
@@ -2054,7 +2054,7 @@ if __name__ == "__main__":
 """
 MLX Server Dashboard v11 - Auto-Router Edition
 Routes between 27B (quality) and fallback (speed) based on prompt length.
-Proxy runs on port 8082. OpenWebUI should connect to http://host:8082/v1
+Proxy runs on port 8082. OpenAI-compatible clients should connect to http://host:8082/v1
 """
 
 import subprocess
@@ -3979,7 +3979,7 @@ class MLXDashboard:
         else:
             console.print("[dim]Fallback: " + FALLBACK_TYPE + " on " + FALLBACK_HOST + ":" + str(FALLBACK_PORT) + " (manual)[/dim]")
         console.print()
-        console.print("[bold yellow]IMPORTANT:[/bold yellow] Set OpenWebUI to http://<host>:" + str(PROXY_PORT) + "/v1")
+        console.print("[bold yellow]IMPORTANT:[/bold yellow] Set your API client to http://<host>:" + str(PROXY_PORT) + "/v1")
         console.print()
 
         self.keyboard.start()

@@ -4,7 +4,7 @@ Dieses Dashboard routed zwischen zwei lokalen `mlx_lm.server`-Instanzen und häl
 
 - **Primary:** automatisch erkanntes Modell auf Port `8080`
 - **Fallback:** automatisch erkanntes zweites MLX-Modell auf Port `8081`, wird bei Bedarf geladen
-- **Proxy:** OpenWebUI spricht den Router auf Port `8082` an
+- **Proxy:** Ein OpenAI-kompatibler Client spricht den Router auf Port `8082` an
 
 ## Dateien
 
@@ -48,14 +48,14 @@ Das Dashboard startet automatisch:
 
 Der Fallback-Server wird erst gestartet, wenn das Routing eine Anfrage dorthin schickt. Dafür wird der 27B-Server zuerst beendet. Beim Rückwechsel wird der Fallback beendet und der 27B-Server wieder geladen. Der erste Request nach einem Wechsel wartet daher auf den Modellstart.
 
-## OpenWebUI einstellen
+## API-Client einstellen
 
 Admin Panel → Settings → Connections → OpenAI API:
 
 - **URL:** `http://<dein-macbook-ip>:8082/v1`
 - **Key:** `dummy` (oder beliebig)
 
-Stelle in OpenWebUI die Anzahl paralleler Requests auf `1`. Der Router serialisiert Chat-Anfragen zusätzlich selbst, damit mehrere OpenWebUI-Anfragen nicht gleichzeitig GPU-Speicher und KV-Caches anfordern.
+Stelle im Client die Anzahl paralleler Requests auf `1`. Der Router serialisiert Chat-Anfragen zusätzlich selbst, damit mehrere Anfragen nicht gleichzeitig GPU-Speicher und KV-Caches anfordern.
 
 ## Hotkeys im Dashboard
 
