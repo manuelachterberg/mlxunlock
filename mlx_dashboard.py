@@ -152,13 +152,13 @@ def suggest_model_limits(primary_spec, fallback_spec):
 
     def context_for(spec):
         native = int(spec.get("native_context_tokens") or 8192)
-        available_gb = max(1.0, total_ram_gb - loaded_model_gb - system_reserve_gb)
+        available_gb = max(1.0, total_ram_gb - spec["weight_gb"] - system_reserve_gb)
         attention_layers = max(1, int(spec.get("attention_layers") or spec.get("layers") or 1))
         kv_heads = max(1, int(spec.get("kv_heads") or 1))
         head_dim = max(1, int(spec.get("head_dim") or 128))
         dtype_bytes = 4 if "32" in str(spec.get("dtype", "")) else 2
         kv_bytes_per_token = 2 * attention_layers * kv_heads * head_dim * dtype_bytes
-        cache_budget_bytes = available_gb * 1024 ** 3 * 0.15
+        cache_budget_bytes = available_gb * 1024 ** 3 * 0.20
         memory_limited = int(cache_budget_bytes / kv_bytes_per_token)
         suggested = 1
         while suggested * 2 <= memory_limited:
@@ -167,14 +167,18 @@ def suggest_model_limits(primary_spec, fallback_spec):
 
     context, available_gb, kv_bytes_per_token = context_for(primary_spec)
     reserve = max(256, min(1024, context // 8))
-    max_generation = min(4096, max(512, context // 4))
-    fallback_limit = max(7, min(8, int(fallback_spec["weight_gb"] + 5)))
+    max_generation = max(512, min(8192, context // 4))
+    primary_memory_limit = min(total_ram_gb * 0.80, primary_spec["weight_gb"] + available_gb * 0.35)
+    fallback_available_gb = max(1.0, total_ram_gb - fallback_spec["weight_gb"] - system_reserve_gb)
+    fallback_limit = min(total_ram_gb * 0.80, fallback_spec["weight_gb"] + fallback_available_gb * 0.35)
     return {
         "max_context_tokens": context,
         "context_safety_margin": reserve,
         "max_generation_tokens": max_generation,
         "primary_prompt_limit": max(1024, int((context - reserve - max_generation) * AUTO_FALLBACK_HEADROOM)),
-        "fallback_memory_limit_gb": fallback_limit,
+        "primary_memory_limit_gb": round(primary_memory_limit, 2),
+        "fallback_memory_limit_gb": round(fallback_limit, 2),
+        "primary_prompt_cache_bytes": int(available_gb * 1024 ** 3 * 0.20),
         "total_ram_gb": round(total_ram_gb, 2),
         "system_reserve_gb": round(system_reserve_gb, 2),
         "loaded_model_gb": round(loaded_model_gb, 2),
@@ -202,8 +206,9 @@ PREFILL_STEP_SIZE = 4096
 PROMPT_CONCURRENCY = 1
 DECODE_CONCURRENCY = 1
 PROMPT_CACHE_SIZE = 1
-SERVER_MAX_TOKENS = 4096
-PRIMARY_PROMPT_HARD_LIMIT = 12000
+PROMPT_CACHE_BYTES = MODEL_LIMIT_SUGGESTIONS["primary_prompt_cache_bytes"]
+SERVER_MAX_TOKENS = MODEL_LIMIT_SUGGESTIONS["max_generation_tokens"]
+PRIMARY_MEMORY_LIMIT = int(MODEL_LIMIT_SUGGESTIONS["primary_memory_limit_gb"] * 1024 ** 3)
 
 # Fallback configuration - CHANGE THIS TO YOUR SETUP
 FALLBACK_TYPE = "mlx_lm"    # "ollama" or "mlx_lm"
@@ -232,7 +237,7 @@ RESTART_COOLDOWN_SECONDS = 60
 THINKING_ENABLED_27B = True
 REASONING_EFFORT_27B = "low"
 MAX_GENERATION_TOKENS_27B = MODEL_LIMIT_SUGGESTIONS["max_generation_tokens"]
-MIN_GENERATION_TOKENS_27B = 2048
+MIN_GENERATION_TOKENS_27B = max(256, min(2048, MAX_GENERATION_TOKENS_27B // 2))
 DYNAMIC_FALLBACK = False
 CONFIG_FILE = Path("router_config.json")
 
@@ -678,9 +683,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def _route_request(self, body: bytes) -> tuple[int, str]:
         estimated_tokens = estimate_tokens_from_body(body)
-        dynamic_limit = dynamic_primary_prompt_limit() if DYNAMIC_FALLBACK else min(
-            TOKEN_LIMIT_27B, PRIMARY_PROMPT_HARD_LIMIT
-        )
+        dynamic_limit = dynamic_primary_prompt_limit() if DYNAMIC_FALLBACK else TOKEN_LIMIT_27B
 
         with PROXY_STATE.lock:
             PROXY_STATE.last_request_tokens = estimated_tokens
@@ -1130,6 +1133,8 @@ class MLXDashboard:
             "PROMPT_CONCURRENCY": str(PROMPT_CONCURRENCY),
             "DECODE_CONCURRENCY": str(DECODE_CONCURRENCY),
             "PROMPT_CACHE_SIZE": str(PROMPT_CACHE_SIZE),
+            "PROMPT_CACHE_BYTES": str(PROMPT_CACHE_BYTES),
+            "PRIMARY_MEMORY_LIMIT": str(PRIMARY_MEMORY_LIMIT),
             "SERVER_MAX_TOKENS": str(SERVER_MAX_TOKENS),
         })
         self.primary_server = ManagedServer(cmd, env, self.log_buffer, self._parse_logs)
@@ -1150,6 +1155,7 @@ class MLXDashboard:
         env["PROMPT_CONCURRENCY"] = str(PROMPT_CONCURRENCY)
         env["DECODE_CONCURRENCY"] = str(DECODE_CONCURRENCY)
         env["PROMPT_CACHE_SIZE"] = str(PROMPT_CACHE_SIZE)
+        env["PROMPT_CACHE_BYTES"] = str(PROMPT_CACHE_BYTES)
         env["SERVER_MAX_TOKENS"] = str(SERVER_MAX_TOKENS)
         self.fallback_server = ManagedServer(
             cmd, env, self.fallback_log_buffer, self._parse_logs, fallback=True
@@ -2154,7 +2160,7 @@ def suggest_model_limits(primary_spec, fallback_spec):
         head_dim = max(1, int(spec.get("head_dim") or 128))
         dtype_bytes = 4 if "32" in str(spec.get("dtype", "")) else 2
         kv_bytes_per_token = 2 * attention_layers * kv_heads * head_dim * dtype_bytes
-        cache_budget_bytes = available_gb * 1024 ** 3 * 0.15
+        cache_budget_bytes = available_gb * 1024 ** 3 * 0.20
         memory_limited = int(cache_budget_bytes / kv_bytes_per_token)
         suggested = 1
         while suggested * 2 <= memory_limited:
@@ -2163,14 +2169,18 @@ def suggest_model_limits(primary_spec, fallback_spec):
 
     context, available_gb, kv_bytes_per_token = context_for(primary_spec)
     reserve = max(256, min(1024, context // 8))
-    max_generation = min(4096, max(512, context // 4))
-    fallback_limit = max(7, min(8, int(fallback_spec["weight_gb"] + 5)))
+    max_generation = max(512, min(8192, context // 4))
+    primary_memory_limit = min(total_ram_gb * 0.80, primary_spec["weight_gb"] + available_gb * 0.35)
+    fallback_available_gb = max(1.0, total_ram_gb - fallback_spec["weight_gb"] - system_reserve_gb)
+    fallback_limit = min(total_ram_gb * 0.80, fallback_spec["weight_gb"] + fallback_available_gb * 0.35)
     return {
         "max_context_tokens": context,
         "context_safety_margin": reserve,
         "max_generation_tokens": max_generation,
         "primary_prompt_limit": max(1024, int((context - reserve - max_generation) * AUTO_FALLBACK_HEADROOM)),
-        "fallback_memory_limit_gb": fallback_limit,
+        "primary_memory_limit_gb": round(primary_memory_limit, 2),
+        "fallback_memory_limit_gb": round(fallback_limit, 2),
+        "primary_prompt_cache_bytes": int(available_gb * 1024 ** 3 * 0.20),
         "total_ram_gb": round(total_ram_gb, 2),
         "system_reserve_gb": round(system_reserve_gb, 2),
         "loaded_model_gb": round(loaded_model_gb, 2),
@@ -2198,7 +2208,9 @@ PREFILL_STEP_SIZE = 4096
 PROMPT_CONCURRENCY = 1
 DECODE_CONCURRENCY = 1
 PROMPT_CACHE_SIZE = 1
-SERVER_MAX_TOKENS = 4096
+PROMPT_CACHE_BYTES = MODEL_LIMIT_SUGGESTIONS["primary_prompt_cache_bytes"]
+SERVER_MAX_TOKENS = MODEL_LIMIT_SUGGESTIONS["max_generation_tokens"]
+PRIMARY_MEMORY_LIMIT = int(MODEL_LIMIT_SUGGESTIONS["primary_memory_limit_gb"] * 1024 ** 3)
 
 # Fallback configuration - CHANGE THIS TO YOUR SETUP
 FALLBACK_TYPE = "mlx_lm"    # "ollama" or "mlx_lm"
@@ -2227,7 +2239,7 @@ RESTART_COOLDOWN_SECONDS = 60
 THINKING_ENABLED_27B = True
 REASONING_EFFORT_27B = "low"
 MAX_GENERATION_TOKENS_27B = MODEL_LIMIT_SUGGESTIONS["max_generation_tokens"]
-MIN_GENERATION_TOKENS_27B = 2048
+MIN_GENERATION_TOKENS_27B = max(256, min(2048, MAX_GENERATION_TOKENS_27B // 2))
 DYNAMIC_FALLBACK = False
 CONFIG_FILE = Path("router_config.json")
 
@@ -2671,9 +2683,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def _route_request(self, body: bytes) -> tuple[int, str]:
         estimated_tokens = estimate_tokens_from_body(body)
-        dynamic_limit = dynamic_primary_prompt_limit() if DYNAMIC_FALLBACK else min(
-            TOKEN_LIMIT_27B, PRIMARY_PROMPT_HARD_LIMIT
-        )
+        dynamic_limit = dynamic_primary_prompt_limit() if DYNAMIC_FALLBACK else TOKEN_LIMIT_27B
 
         with PROXY_STATE.lock:
             PROXY_STATE.last_request_tokens = estimated_tokens
@@ -3113,6 +3123,8 @@ class MLXDashboard:
             "PROMPT_CONCURRENCY": str(PROMPT_CONCURRENCY),
             "DECODE_CONCURRENCY": str(DECODE_CONCURRENCY),
             "PROMPT_CACHE_SIZE": str(PROMPT_CACHE_SIZE),
+            "PROMPT_CACHE_BYTES": str(PROMPT_CACHE_BYTES),
+            "PRIMARY_MEMORY_LIMIT": str(PRIMARY_MEMORY_LIMIT),
             "SERVER_MAX_TOKENS": str(SERVER_MAX_TOKENS),
         })
         self.primary_server = ManagedServer(cmd, env, self.log_buffer, self._parse_logs)
@@ -3133,6 +3145,7 @@ class MLXDashboard:
         env["PROMPT_CONCURRENCY"] = str(PROMPT_CONCURRENCY)
         env["DECODE_CONCURRENCY"] = str(DECODE_CONCURRENCY)
         env["PROMPT_CACHE_SIZE"] = str(PROMPT_CACHE_SIZE)
+        env["PROMPT_CACHE_BYTES"] = str(PROMPT_CACHE_BYTES)
         env["SERVER_MAX_TOKENS"] = str(SERVER_MAX_TOKENS)
         self.fallback_server = ManagedServer(
             cmd, env, self.fallback_log_buffer, self._parse_logs, fallback=True

@@ -15,6 +15,7 @@ PREFILL_STEP_SIZE = os.environ.get("PREFILL_STEP_SIZE", "4096")
 PROMPT_CONCURRENCY = os.environ.get("PROMPT_CONCURRENCY", "1")
 DECODE_CONCURRENCY = os.environ.get("DECODE_CONCURRENCY", "1")
 PROMPT_CACHE_SIZE = os.environ.get("PROMPT_CACHE_SIZE", "1")
+PROMPT_CACHE_BYTES = os.environ.get("PROMPT_CACHE_BYTES")
 SERVER_MAX_TOKENS = os.environ.get("SERVER_MAX_TOKENS", "4096")
 
 sys.argv = [
@@ -28,6 +29,8 @@ sys.argv = [
     "--prompt-cache-size", PROMPT_CACHE_SIZE,
     "--max-tokens", SERVER_MAX_TOKENS,
 ]
+if PROMPT_CACHE_BYTES:
+    sys.argv.extend(["--prompt-cache-bytes", PROMPT_CACHE_BYTES])
 
 from mlx_lm.server import main
 main()
