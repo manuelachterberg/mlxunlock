@@ -147,6 +147,13 @@ Set the client's concurrent request limit to `1`. The proxy also serializes chat
 | `R` | Restart primary (27B) server |
 | `F` | Restart fallback server |
 | `S` | Toggle forced fallback / auto routing |
+| `A` | Enable automatic routing |
+| `D` | Toggle dynamic fallback routing |
+| `1` | Route all requests to the primary model |
+| `2` | Route all requests to the fallback model |
+| `X` | Start or stop the fallback server |
+| `Z` | Start or stop the primary server |
+| `K` | Open the configuration screen |
 | `C` | Clear logs and history |
 | `P` | Save stats to file |
 
