@@ -12,6 +12,10 @@ A local LLM router dashboard for macOS / Apple Silicon. It runs two `mlx_lm.serv
 
 Built for a locally discovered MLX primary model and fallback model, configurable for any MLX-compatible model.
 
+## Dashboard
+
+![MLX Auto-Router Dashboard](assets/mlx-screenshot.png)
+
 ## Demo Video
 
 Watch the demo on YouTube:
