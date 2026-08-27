@@ -42,6 +42,7 @@ except ImportError:
 
 console = Console()
 LOGGER = logging.getLogger("mlx_router")
+
 AUTO_FALLBACK_HEADROOM = 0.85
 
 # ═══════════════════════════════════════════════════════════════
@@ -147,7 +148,7 @@ def scan_model_spec(model_path):
 def suggest_model_limits(primary_spec, fallback_spec):
     total_ram_gb = psutil.virtual_memory().total / 1024 ** 3
     system_reserve_gb = max(4.0, total_ram_gb * 0.15)
-    loaded_model_gb = primary_spec["weight_gb"] + fallback_spec["weight_gb"]
+    loaded_model_gb = primary_spec["weight_gb"]
 
     def context_for(spec):
         native = int(spec.get("native_context_tokens") or 8192)
@@ -167,7 +168,7 @@ def suggest_model_limits(primary_spec, fallback_spec):
     context, available_gb, kv_bytes_per_token = context_for(primary_spec)
     reserve = max(256, min(1024, context // 8))
     max_generation = min(4096, max(512, context // 4))
-    fallback_limit = max(8, min(16, int(fallback_spec["weight_gb"] + 5)))
+    fallback_limit = max(7, min(8, int(fallback_spec["weight_gb"] + 5)))
     return {
         "max_context_tokens": context,
         "context_safety_margin": reserve,
@@ -200,13 +201,17 @@ HOST = "0.0.0.0"
 PREFILL_STEP_SIZE = 4096
 PROMPT_CONCURRENCY = 1
 DECODE_CONCURRENCY = 1
+PROMPT_CACHE_SIZE = 1
+SERVER_MAX_TOKENS = 4096
+PRIMARY_PROMPT_HARD_LIMIT = 12000
 
 # Fallback configuration - CHANGE THIS TO YOUR SETUP
 FALLBACK_TYPE = "mlx_lm"    # "ollama" or "mlx_lm"
 FALLBACK_HOST = "localhost"
 FALLBACK_PORT = 8081        # Ollama default=11434, second mlx_lm=8081
 FALLBACK_MEMORY_LIMIT = int(MODEL_LIMIT_SUGGESTIONS["fallback_memory_limit_gb"] * 1024 ** 3)
-AUTO_START_FALLBACK = True
+AUTO_START_FALLBACK = False
+LAZY_FALLBACK = True
 
 MAX_CONTEXT_TOKENS = MODEL_LIMIT_SUGGESTIONS["max_context_tokens"]
 CONTEXT_SAFETY_MARGIN = MODEL_LIMIT_SUGGESTIONS["context_safety_margin"]
@@ -216,7 +221,7 @@ EFFECT_PANEL_HEIGHT = 13
 EFFECT_ROWS = 9
 TOKEN_LIMIT_27B = MODEL_LIMIT_SUGGESTIONS["primary_prompt_limit"]
 SWAP_LIMIT_27B = 4.0
-ROUTE_ON_SWAP = False
+ROUTE_ON_SWAP = True
 AUTO_RESTART_27B = True
 RESTART_AFTER_REQUESTS_27B = 20
 RESTART_ON_SWAP_GB_27B = 8.0
@@ -244,6 +249,7 @@ def load_saved_config():
         "MODEL_PATH", "FALLBACK_MODEL_PATH", "FALLBACK_MEMORY_LIMIT",
         "MAX_CONTEXT_TOKENS", "CONTEXT_SAFETY_MARGIN", "TOKEN_LIMIT_27B",
         "PREFILL_STEP_SIZE", "PROMPT_CONCURRENCY", "DECODE_CONCURRENCY",
+
         "MAX_GENERATION_TOKENS_27B", "THINKING_ENABLED_27B",
         "REASONING_EFFORT_27B", "ROUTE_ON_SWAP", "AUTO_RESTART_27B",
     ):
@@ -487,6 +493,7 @@ class ProxyState:
         self.lock = threading.Lock()
         self.primary_healthy = True
         self.fallback_available = False
+        self.request_lock = threading.Lock()
 
 PROXY_STATE = ProxyState()
 
@@ -565,15 +572,6 @@ def apply_primary_sampling_policy(body: bytes) -> bytes:
 
     data.setdefault("repetition_penalty", 1.12)
     return json.dumps(data, ensure_ascii=False).encode("utf-8")
-
-
-def has_repeated_output_loop(text: str) -> bool:
-    normalized = re.sub(r"\s+", " ", text).strip()
-    window_size = 120
-    if len(normalized) < window_size * 3:
-        return False
-    tail = normalized[-window_size:]
-    return normalized[:-window_size].count(tail) >= 2
 
 
 def limit_generation_for_primary(body: bytes) -> bytes:
@@ -680,7 +678,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def _route_request(self, body: bytes) -> tuple[int, str]:
         estimated_tokens = estimate_tokens_from_body(body)
-        dynamic_limit = dynamic_primary_prompt_limit() if DYNAMIC_FALLBACK else TOKEN_LIMIT_27B
+        dynamic_limit = dynamic_primary_prompt_limit() if DYNAMIC_FALLBACK else min(
+            TOKEN_LIMIT_27B, PRIMARY_PROMPT_HARD_LIMIT
+        )
 
         with PROXY_STATE.lock:
             PROXY_STATE.last_request_tokens = estimated_tokens
@@ -701,6 +701,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 raise ConnectionError("No model backend available")
 
             fallback_ok = check_fallback_available()
+            fallback_configured = fallback_ok or (LAZY_FALLBACK and self.dashboard is not None)
             PROXY_STATE.fallback_available = fallback_ok
 
             if PROXY_STATE.routing_mode == "PRIMARY":
@@ -716,7 +717,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     PROXY_STATE.total_routed_fallback += 1
                     return FALLBACK_PORT, PROXY_STATE.routing_reason
 
-            if not fallback_ok:
+            if not fallback_configured:
                 PROXY_STATE.active_backend = "27B"
                 PROXY_STATE.routing_reason = str(estimated_tokens) + "t (no fallback)"
                 PROXY_STATE.total_routed_27b += 1
@@ -802,16 +803,30 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 self.wfile.write(model_body)
                 self.wfile.flush()
             return
+        request_lock = None
+        if method == "POST" and self.path == "/v1/chat/completions" and self.dashboard:
+            request_lock = PROXY_STATE.request_lock
+            request_lock.acquire()
         try:
             target_port, reason = self._route_request(body or b"")
         except ConnectionError as error:
             LOGGER.error("no backend available method=%s path=%s error=%s", method, self.path, error)
             self.send_error(503, "No model backend available")
+            if request_lock:
+                request_lock.release()
             return
         if self.command == "POST" and self.path == "/v1/chat/completions" and self.dashboard:
+            if not self.dashboard.ensure_backend(target_port):
+                LOGGER.error("selected backend failed to start target=%s path=%s", target_port, self.path)
+                self.send_error(503, "Selected model backend failed to start")
+                if request_lock:
+                    request_lock.release()
+                return
             if not check_backend_available(target_port, "/v1/models"):
                 LOGGER.error("selected backend unavailable target=%s path=%s", target_port, self.path)
                 self.send_error(503, "Selected model backend is unavailable")
+                if request_lock:
+                    request_lock.release()
                 return
             with self.dashboard.lock:
                 self.dashboard.inference_phase = "PREFILL"
@@ -841,8 +856,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
             streamed_tokens = 0
             stream_buffer = b""
             response_body = bytearray()
-            generated_text = ""
-            loop_detected = False
             conn = http.client.HTTPConnection(target_host, target_port, timeout=300)
             headers = {k: v for k, v in self.headers.items()}
             headers['Content-Length'] = str(len(prepared_body))
@@ -891,12 +904,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
                             continue
                         choices = event.get("choices", [])
                         delta = choices[0].get("delta", {}) if choices else {}
-                        content = delta.get("content")
-                        if isinstance(content, str):
-                            generated_text += content
-                            if has_repeated_output_loop(generated_text):
-                                loop_detected = True
-                                break
                         if delta.get("content") or delta.get("reasoning_content"):
                             if decode_started_at is None:
                                 decode_started_at = time.perf_counter()
@@ -909,13 +916,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
                                 self.dashboard.decode_speed = rate
                                 self.dashboard.is_processing = True
                                 self.dashboard.last_infer_time = time.time()
-                    if loop_detected:
-                        break
-                if loop_detected:
-                    LOGGER.warning("repeated output loop stopped target=%s path=%s", target_port, path)
-                    self.wfile.write(b"data: [DONE]\n\n")
-                    self.wfile.flush()
-                    break
                 try:
                     self.wfile.write(chunk)
                     self.wfile.flush()
@@ -948,12 +948,22 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         except Exception:
             LOGGER.exception("backend failure target=%s path=%s", target_port, self.path)
+            if target_port == PRIMARY_PORT and LAZY_FALLBACK and self.dashboard:
+                with PROXY_STATE.lock:
+                    PROXY_STATE.primary_healthy = False
+                    PROXY_STATE.fallback_available = True
+                if self.dashboard.ensure_backend(FALLBACK_PORT):
+                    self._forward_fallback(method, self._prepare_body(FALLBACK_PORT, body or b""))
+                    return
             if target_port == PRIMARY_PORT and PROXY_STATE.fallback_available:
                 with PROXY_STATE.lock:
                     PROXY_STATE.primary_healthy = False
                 self._forward_fallback(method, body)
             else:
                 self.send_error(502, "Bad Gateway")
+        finally:
+            if request_lock:
+                request_lock.release()
 
     def _forward_fallback(self, method: str, body: bytes):
         try:
@@ -1088,6 +1098,7 @@ class MLXDashboard:
         self.config_mode = False
         self.last_primary_restart = 0.0
         self.restart_lock = threading.Lock()
+        self.backend_switch_lock = threading.Lock()
         self.last_restart_request_count = 0
         self.swap_restart_armed = True
         with PROXY_STATE.lock:
@@ -1118,6 +1129,8 @@ class MLXDashboard:
             "PREFILL_STEP_SIZE": str(PREFILL_STEP_SIZE),
             "PROMPT_CONCURRENCY": str(PROMPT_CONCURRENCY),
             "DECODE_CONCURRENCY": str(DECODE_CONCURRENCY),
+            "PROMPT_CACHE_SIZE": str(PROMPT_CACHE_SIZE),
+            "SERVER_MAX_TOKENS": str(SERVER_MAX_TOKENS),
         })
         self.primary_server = ManagedServer(cmd, env, self.log_buffer, self._parse_logs)
         self.server_process = self.primary_server.start()
@@ -1126,7 +1139,7 @@ class MLXDashboard:
             self.monitor_thread.start()
 
     def start_fallback_server(self):
-        if not AUTO_START_FALLBACK:
+        if not AUTO_START_FALLBACK and not LAZY_FALLBACK:
             return
         cmd = [sys.executable, "mlx_server_fallback_wrapper.py"]
         env = os.environ.copy()
@@ -1136,10 +1149,34 @@ class MLXDashboard:
         env["PREFILL_STEP_SIZE"] = str(PREFILL_STEP_SIZE)
         env["PROMPT_CONCURRENCY"] = str(PROMPT_CONCURRENCY)
         env["DECODE_CONCURRENCY"] = str(DECODE_CONCURRENCY)
+        env["PROMPT_CACHE_SIZE"] = str(PROMPT_CACHE_SIZE)
+        env["SERVER_MAX_TOKENS"] = str(SERVER_MAX_TOKENS)
         self.fallback_server = ManagedServer(
             cmd, env, self.fallback_log_buffer, self._parse_logs, fallback=True
         )
         self.fallback_process = self.fallback_server.start()
+
+    def ensure_backend(self, target_port):
+        with self.backend_switch_lock:
+            desired_process = self.server_process if target_port == PRIMARY_PORT else self.fallback_process
+            if desired_process and desired_process.poll() is None:
+                return check_backend_available(target_port, "/v1/models")
+
+            if target_port == PRIMARY_PORT:
+                if self.fallback_server:
+                    self.fallback_server.stop()
+                self.start_server()
+            else:
+                if self.primary_server:
+                    self.primary_server.stop()
+                self.start_fallback_server()
+
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline:
+                if check_backend_available(target_port, "/v1/models"):
+                    return True
+                time.sleep(0.5)
+            return False
 
     def restart_server(self):
         if not self.restart_lock.acquire(blocking=False):
@@ -1171,7 +1208,7 @@ class MLXDashboard:
         self._notify("PRIMARY SERVER RESTARTED")
 
     def _maybe_auto_restart(self):
-        if not AUTO_RESTART_27B or self.is_processing or self.force_fallback:
+        if LAZY_FALLBACK or not AUTO_RESTART_27B or self.is_processing or self.force_fallback:
             return
         now = time.time()
         if now - self.last_primary_restart < RESTART_COOLDOWN_SECONDS:
@@ -1549,10 +1586,10 @@ class MLXDashboard:
                     self.is_processing = True
                     self.inference_phase = "PREFILL" if self.prompt_current < self.prompt_total else "DECODE"
                     self.last_activity = datetime.now().strftime("%H:%M:%S")
-                    self.last_infer_time = time.time()
                     now = time.time()
                     if not self.process_start_time:
-                        self.process_start_time = now
+                        self.process_start_time = self.last_infer_time or now
+                    self.last_infer_time = now
                     elapsed = now - self.process_start_time
                     if elapsed > 0 and self.prompt_current > 0:
                         self.prefill_speed = self.prompt_current / elapsed
@@ -2107,7 +2144,7 @@ def scan_model_spec(model_path):
 def suggest_model_limits(primary_spec, fallback_spec):
     total_ram_gb = psutil.virtual_memory().total / 1024 ** 3
     system_reserve_gb = max(4.0, total_ram_gb * 0.15)
-    loaded_model_gb = primary_spec["weight_gb"] + fallback_spec["weight_gb"]
+    loaded_model_gb = primary_spec["weight_gb"]
 
     def context_for(spec):
         native = int(spec.get("native_context_tokens") or 8192)
@@ -2127,7 +2164,7 @@ def suggest_model_limits(primary_spec, fallback_spec):
     context, available_gb, kv_bytes_per_token = context_for(primary_spec)
     reserve = max(256, min(1024, context // 8))
     max_generation = min(4096, max(512, context // 4))
-    fallback_limit = max(8, min(16, int(fallback_spec["weight_gb"] + 5)))
+    fallback_limit = max(7, min(8, int(fallback_spec["weight_gb"] + 5)))
     return {
         "max_context_tokens": context,
         "context_safety_margin": reserve,
@@ -2160,13 +2197,16 @@ HOST = "0.0.0.0"
 PREFILL_STEP_SIZE = 4096
 PROMPT_CONCURRENCY = 1
 DECODE_CONCURRENCY = 1
+PROMPT_CACHE_SIZE = 1
+SERVER_MAX_TOKENS = 4096
 
 # Fallback configuration - CHANGE THIS TO YOUR SETUP
 FALLBACK_TYPE = "mlx_lm"    # "ollama" or "mlx_lm"
 FALLBACK_HOST = "localhost"
 FALLBACK_PORT = 8081        # Ollama default=11434, second mlx_lm=8081
 FALLBACK_MEMORY_LIMIT = int(MODEL_LIMIT_SUGGESTIONS["fallback_memory_limit_gb"] * 1024 ** 3)
-AUTO_START_FALLBACK = True
+AUTO_START_FALLBACK = False
+LAZY_FALLBACK = True
 
 MAX_CONTEXT_TOKENS = MODEL_LIMIT_SUGGESTIONS["max_context_tokens"]
 CONTEXT_SAFETY_MARGIN = MODEL_LIMIT_SUGGESTIONS["context_safety_margin"]
@@ -2176,7 +2216,7 @@ EFFECT_PANEL_HEIGHT = 13
 EFFECT_ROWS = 9
 TOKEN_LIMIT_27B = MODEL_LIMIT_SUGGESTIONS["primary_prompt_limit"]
 SWAP_LIMIT_27B = 4.0
-ROUTE_ON_SWAP = False
+ROUTE_ON_SWAP = True
 AUTO_RESTART_27B = True
 RESTART_AFTER_REQUESTS_27B = 20
 RESTART_ON_SWAP_GB_27B = 8.0
@@ -2527,15 +2567,6 @@ def apply_primary_sampling_policy(body: bytes) -> bytes:
     return json.dumps(data, ensure_ascii=False).encode("utf-8")
 
 
-def has_repeated_output_loop(text: str) -> bool:
-    normalized = re.sub(r"\s+", " ", text).strip()
-    window_size = 120
-    if len(normalized) < window_size * 3:
-        return False
-    tail = normalized[-window_size:]
-    return normalized[:-window_size].count(tail) >= 2
-
-
 def limit_generation_for_primary(body: bytes) -> bytes:
     try:
         data = json.loads(body)
@@ -2640,7 +2671,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def _route_request(self, body: bytes) -> tuple[int, str]:
         estimated_tokens = estimate_tokens_from_body(body)
-        dynamic_limit = dynamic_primary_prompt_limit() if DYNAMIC_FALLBACK else TOKEN_LIMIT_27B
+        dynamic_limit = dynamic_primary_prompt_limit() if DYNAMIC_FALLBACK else min(
+            TOKEN_LIMIT_27B, PRIMARY_PROMPT_HARD_LIMIT
+        )
 
         with PROXY_STATE.lock:
             PROXY_STATE.last_request_tokens = estimated_tokens
@@ -2661,6 +2694,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 raise ConnectionError("No model backend available")
 
             fallback_ok = check_fallback_available()
+            fallback_configured = fallback_ok or (LAZY_FALLBACK and self.dashboard is not None)
             PROXY_STATE.fallback_available = fallback_ok
 
             if PROXY_STATE.routing_mode == "PRIMARY":
@@ -2767,11 +2801,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
         except ConnectionError as error:
             LOGGER.error("no backend available method=%s path=%s error=%s", method, self.path, error)
             self.send_error(503, "No model backend available")
+            if request_lock:
+                request_lock.release()
             return
         if self.command == "POST" and self.path == "/v1/chat/completions" and self.dashboard:
             if not check_backend_available(target_port, "/v1/models"):
                 LOGGER.error("selected backend unavailable target=%s path=%s", target_port, self.path)
                 self.send_error(503, "Selected model backend is unavailable")
+                if request_lock:
+                    request_lock.release()
                 return
             with self.dashboard.lock:
                 self.dashboard.inference_phase = "PREFILL"
@@ -2801,8 +2839,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
             streamed_tokens = 0
             stream_buffer = b""
             response_body = bytearray()
-            generated_text = ""
-            loop_detected = False
             conn = http.client.HTTPConnection(target_host, target_port, timeout=300)
             headers = {k: v for k, v in self.headers.items()}
             headers['Content-Length'] = str(len(prepared_body))
@@ -2851,12 +2887,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
                             continue
                         choices = event.get("choices", [])
                         delta = choices[0].get("delta", {}) if choices else {}
-                        content = delta.get("content")
-                        if isinstance(content, str):
-                            generated_text += content
-                            if has_repeated_output_loop(generated_text):
-                                loop_detected = True
-                                break
                         if delta.get("content") or delta.get("reasoning_content"):
                             if decode_started_at is None:
                                 decode_started_at = time.perf_counter()
@@ -2869,13 +2899,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
                                 self.dashboard.decode_speed = rate
                                 self.dashboard.is_processing = True
                                 self.dashboard.last_infer_time = time.time()
-                    if loop_detected:
-                        break
-                if loop_detected:
-                    LOGGER.warning("repeated output loop stopped target=%s path=%s", target_port, path)
-                    self.wfile.write(b"data: [DONE]\n\n")
-                    self.wfile.flush()
-                    break
                 try:
                     self.wfile.write(chunk)
                     self.wfile.flush()
@@ -2908,12 +2931,22 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         except Exception:
             LOGGER.exception("backend failure target=%s path=%s", target_port, self.path)
+            if target_port == PRIMARY_PORT and LAZY_FALLBACK and self.dashboard:
+                with PROXY_STATE.lock:
+                    PROXY_STATE.primary_healthy = False
+                    PROXY_STATE.fallback_available = True
+                if self.dashboard.ensure_backend(FALLBACK_PORT):
+                    self._forward_fallback(method, self._prepare_body(FALLBACK_PORT, body or b""))
+                    return
             if target_port == PRIMARY_PORT and PROXY_STATE.fallback_available:
                 with PROXY_STATE.lock:
                     PROXY_STATE.primary_healthy = False
                 self._forward_fallback(method, body)
             else:
                 self.send_error(502, "Bad Gateway")
+        finally:
+            if request_lock:
+                request_lock.release()
 
     def _forward_fallback(self, method: str, body: bytes):
         try:
@@ -3048,6 +3081,7 @@ class MLXDashboard:
         self.config_mode = False
         self.last_primary_restart = 0.0
         self.restart_lock = threading.Lock()
+        self.backend_switch_lock = threading.Lock()
         self.last_restart_request_count = 0
         self.swap_restart_armed = True
         with PROXY_STATE.lock:
@@ -3078,6 +3112,8 @@ class MLXDashboard:
             "PREFILL_STEP_SIZE": str(PREFILL_STEP_SIZE),
             "PROMPT_CONCURRENCY": str(PROMPT_CONCURRENCY),
             "DECODE_CONCURRENCY": str(DECODE_CONCURRENCY),
+            "PROMPT_CACHE_SIZE": str(PROMPT_CACHE_SIZE),
+            "SERVER_MAX_TOKENS": str(SERVER_MAX_TOKENS),
         })
         self.primary_server = ManagedServer(cmd, env, self.log_buffer, self._parse_logs)
         self.server_process = self.primary_server.start()
@@ -3086,7 +3122,7 @@ class MLXDashboard:
             self.monitor_thread.start()
 
     def start_fallback_server(self):
-        if not AUTO_START_FALLBACK:
+        if not AUTO_START_FALLBACK and not LAZY_FALLBACK:
             return
         cmd = [sys.executable, "mlx_server_fallback_wrapper.py"]
         env = os.environ.copy()
@@ -3096,10 +3132,34 @@ class MLXDashboard:
         env["PREFILL_STEP_SIZE"] = str(PREFILL_STEP_SIZE)
         env["PROMPT_CONCURRENCY"] = str(PROMPT_CONCURRENCY)
         env["DECODE_CONCURRENCY"] = str(DECODE_CONCURRENCY)
+        env["PROMPT_CACHE_SIZE"] = str(PROMPT_CACHE_SIZE)
+        env["SERVER_MAX_TOKENS"] = str(SERVER_MAX_TOKENS)
         self.fallback_server = ManagedServer(
             cmd, env, self.fallback_log_buffer, self._parse_logs, fallback=True
         )
         self.fallback_process = self.fallback_server.start()
+
+    def ensure_backend(self, target_port):
+        with self.backend_switch_lock:
+            desired_process = self.server_process if target_port == PRIMARY_PORT else self.fallback_process
+            if desired_process and desired_process.poll() is None:
+                return check_backend_available(target_port, "/v1/models")
+
+            if target_port == PRIMARY_PORT:
+                if self.fallback_server:
+                    self.fallback_server.stop()
+                self.start_server()
+            else:
+                if self.primary_server:
+                    self.primary_server.stop()
+                self.start_fallback_server()
+
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline:
+                if check_backend_available(target_port, "/v1/models"):
+                    return True
+                time.sleep(0.5)
+            return False
 
     def restart_server(self):
         if not self.restart_lock.acquire(blocking=False):
@@ -3131,7 +3191,7 @@ class MLXDashboard:
         self._notify("PRIMARY SERVER RESTARTED")
 
     def _maybe_auto_restart(self):
-        if not AUTO_RESTART_27B or self.is_processing or self.force_fallback:
+        if LAZY_FALLBACK or not AUTO_RESTART_27B or self.is_processing or self.force_fallback:
             return
         now = time.time()
         if now - self.last_primary_restart < RESTART_COOLDOWN_SECONDS:
@@ -3509,10 +3569,10 @@ class MLXDashboard:
                     self.is_processing = True
                     self.inference_phase = "PREFILL" if self.prompt_current < self.prompt_total else "DECODE"
                     self.last_activity = datetime.now().strftime("%H:%M:%S")
-                    self.last_infer_time = time.time()
                     now = time.time()
                     if not self.process_start_time:
-                        self.process_start_time = now
+                        self.process_start_time = self.last_infer_time or now
+                    self.last_infer_time = now
                     elapsed = now - self.process_start_time
                     if elapsed > 0 and self.prompt_current > 0:
                         self.prefill_speed = self.prompt_current / elapsed

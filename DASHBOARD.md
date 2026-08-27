@@ -1,9 +1,9 @@
 # MLX Dashboard – Auto-Router mit zwei MLX-Modellen
 
-Dieses Dashboard startet und routed zwischen zwei lokalen `mlx_lm.server`-Instanzen:
+Dieses Dashboard routed zwischen zwei lokalen `mlx_lm.server`-Instanzen und hält standardmäßig nur eine davon im Speicher:
 
 - **Primary:** automatisch erkanntes Modell auf Port `8080`
-- **Fallback:** automatisch erkanntes zweites MLX-Modell auf Port `8081`
+- **Fallback:** automatisch erkanntes zweites MLX-Modell auf Port `8081`, wird bei Bedarf geladen
 - **Proxy:** OpenWebUI spricht den Router auf Port `8082` an
 
 ## Dateien
@@ -26,7 +26,8 @@ PROXY_PORT = 8082
 FALLBACK_TYPE = "mlx_lm"
 FALLBACK_PORT = 8081
 FALLBACK_MEMORY_LIMIT = "Vorschlag aus dem Startscan"
-AUTO_START_FALLBACK = True
+AUTO_START_FALLBACK = False
+LAZY_FALLBACK = True
 
 REASONING_EFFORT_27B = "low"
 TOKEN_LIMIT_27B = "Vorschlag aus dem Startscan"
@@ -43,8 +44,9 @@ python mlx_dashboard.py
 
 Das Dashboard startet automatisch:
 1. 27B-Server auf Port 8080
-2. Fallback-Server auf Port 8081
-3. Proxy auf Port 8082
+2. Proxy auf Port 8082
+
+Der Fallback-Server wird erst gestartet, wenn das Routing eine Anfrage dorthin schickt. Dafür wird der 27B-Server zuerst beendet. Beim Rückwechsel wird der Fallback beendet und der 27B-Server wieder geladen. Der erste Request nach einem Wechsel wartet daher auf den Modellstart.
 
 ## OpenWebUI einstellen
 
@@ -52,6 +54,8 @@ Admin Panel → Settings → Connections → OpenAI API:
 
 - **URL:** `http://<dein-macbook-ip>:8082/v1`
 - **Key:** `dummy` (oder beliebig)
+
+Stelle in OpenWebUI die Anzahl paralleler Requests auf `1`. Der Router serialisiert Chat-Anfragen zusätzlich selbst, damit mehrere OpenWebUI-Anfragen nicht gleichzeitig GPU-Speicher und KV-Caches anfordern.
 
 ## Hotkeys im Dashboard
 
@@ -80,7 +84,7 @@ Admin Panel → Settings → Connections → OpenAI API:
 | 27B crashed/unhealthy | → Fallback | ▶ FALLBACK (27B crashed) |
 | Du drückst `S` | → Fallback | ▶ FALLBACK (FORCED) |
 
-Ohne erreichbaren Fallback-Server routed der Proxy immer zu 27B.
+Der Proxy startet den Fallback bei aktiviertem `LAZY_FALLBACK` automatisch. Ohne konfiguriertes Fallback-Modell routed er immer zu 27B.
 
 ## Thinking-Stärke steuern
 

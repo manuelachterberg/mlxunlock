@@ -69,6 +69,8 @@ Watch the demo on YouTube:
 
 `start.sh` creates `.venv` when needed, installs [requirements.txt](requirements.txt), and starts the dashboard. At startup the dashboard scans `MODEL_ROOT` (default `./models`) for local MLX model directories. If none are found, an interactive terminal wizard offers to download the default `mlx-community/Qwen3.5-27B-4bit` and `mlx-community/Qwen3.5-9B-4bit` models or accepts custom Hugging Face model IDs for the primary and fallback models. Set `PRIMARY_MODEL_PATH` and `FALLBACK_MODEL_PATH` to override automatic selection.
 
+The router uses lazy fallback loading by default: only one model server is kept in memory at a time. When a request is routed to the fallback, the primary server is stopped before the fallback starts; switching back reverses the process. The first request after a model switch waits for that model to load, but this avoids loading both models into unified memory and reduces swap on smaller Apple Silicon Macs.
+
 ---
 
 ## Configuration
@@ -86,7 +88,8 @@ FALLBACK_TYPE = "mlx_lm"
 FALLBACK_HOST = "localhost"
 FALLBACK_PORT = 8081
 FALLBACK_MEMORY_LIMIT = "derived by startup scan"
-AUTO_START_FALLBACK = True
+AUTO_START_FALLBACK = False
+LAZY_FALLBACK = True
 
 REASONING_EFFORT_27B = "low"
 TOKEN_LIMIT_27B = "derived by startup scan"
@@ -127,6 +130,8 @@ http://<your-mac-ip>:8082/v1
 ```
 
 Use any non-empty string as the API key, for example `dummy`.
+
+Set OpenWebUI's concurrent request limit to `1`. The proxy also serializes chat requests server-side so multiple OpenWebUI requests cannot trigger simultaneous MLX generations.
 
 ---
 
