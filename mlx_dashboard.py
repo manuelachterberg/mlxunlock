@@ -533,6 +533,25 @@ def inject_chat_template_kwargs(body: bytes, kwargs: dict) -> bytes:
     return json.dumps(data, ensure_ascii=False).encode("utf-8")
 
 
+def apply_thinking_override(body: bytes) -> tuple[bytes, bool | None]:
+    try:
+        data = json.loads(body)
+    except Exception:
+        return body, None
+    override = None
+    for message in data.get("messages", []):
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        if "[[no-think]]" in content:
+            override = False
+            message["content"] = content.replace("[[no-think]]", "").strip()
+        elif "[[think]]" in content:
+            override = True
+            message["content"] = content.replace("[[think]]", "").strip()
+    return json.dumps(data, ensure_ascii=False).encode("utf-8"), override
+
+
 def limit_generation_to_context(body: bytes) -> bytes:
     try:
         data = json.loads(body)
@@ -764,6 +783,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return body
         body = normalize_backend_model(body, target_port)
         if target_port == PRIMARY_PORT:
+            body, thinking_override = apply_thinking_override(body)
             body = ensure_generation_budget_for_primary(body)
             body = limit_generation_to_context(body)
             body = limit_generation_for_primary(body)
@@ -771,7 +791,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             body = inject_chat_template_kwargs(
                 body,
                 {
-                    "enable_thinking": THINKING_ENABLED_27B,
+                    "enable_thinking": THINKING_ENABLED_27B if thinking_override is None else thinking_override,
                     "reasoning_effort": REASONING_EFFORT_27B,
                 },
             )
@@ -1697,6 +1717,10 @@ class MLXDashboard:
             self.print_stats()
         elif cmd == 'k':
             self.configure(live)
+        elif cmd == 't':
+            global THINKING_ENABLED_27B
+            THINKING_ENABLED_27B = not THINKING_ENABLED_27B
+            self._notify("PRIMARY THINKING: " + ("ON" if THINKING_ENABLED_27B else "OFF"))
         elif cmd == 's':
             self.toggle_fallback()
         elif cmd == 'a':
@@ -1740,6 +1764,7 @@ class MLXDashboard:
             ("C", "Clear", "bold yellow"),
             ("P", "Print", "bold green"),
             ("K", "Konfig", "bold magenta"),
+            ("T", "Thinking on/off", "bold cyan"),
         ]
         for key, label, style in hotkeys:
             if key:
@@ -2764,6 +2789,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return body
         body = normalize_backend_model(body, target_port)
         if target_port == PRIMARY_PORT:
+            body, thinking_override = apply_thinking_override(body)
             body = ensure_generation_budget_for_primary(body)
             body = limit_generation_to_context(body)
             body = limit_generation_for_primary(body)
@@ -2771,7 +2797,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             body = inject_chat_template_kwargs(
                 body,
                 {
-                    "enable_thinking": THINKING_ENABLED_27B,
+                    "enable_thinking": THINKING_ENABLED_27B if thinking_override is None else thinking_override,
                     "reasoning_effort": REASONING_EFFORT_27B,
                 },
             )
@@ -3687,6 +3713,10 @@ class MLXDashboard:
             self.print_stats()
         elif cmd == 'k':
             self.configure(live)
+        elif cmd == 't':
+            global THINKING_ENABLED_27B
+            THINKING_ENABLED_27B = not THINKING_ENABLED_27B
+            self._notify("PRIMARY THINKING: " + ("ON" if THINKING_ENABLED_27B else "OFF"))
         elif cmd == 's':
             self.toggle_fallback()
         elif cmd == 'a':
@@ -3730,6 +3760,7 @@ class MLXDashboard:
             ("C", "Clear", "bold yellow"),
             ("P", "Print", "bold green"),
             ("K", "Konfig", "bold magenta"),
+            ("T", "Thinking on/off", "bold cyan"),
         ]
         for key, label, style in hotkeys:
             if key:

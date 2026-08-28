@@ -135,6 +135,8 @@ http://<your-mac-ip>:8082/v1
 
 Use any non-empty string as the API key, for example `dummy`.
 
+Thinking can be controlled per request with the tags `[[think]]` and `[[no-think]]`. The router removes the tag before sending the prompt to the model. Without a tag, the global setting applies; press `T` in the dashboard to toggle the primary thinking default.
+
 Set the client's concurrent request limit to `1`. The proxy also serializes chat requests server-side so multiple requests cannot trigger simultaneous MLX generations.
 
 ---
@@ -154,6 +156,7 @@ Set the client's concurrent request limit to `1`. The proxy also serializes chat
 | `X` | Start or stop the fallback server |
 | `Z` | Start or stop the primary server |
 | `K` | Open the configuration screen |
+| `T` | Toggle primary thinking on or off |
 | `C` | Clear logs and history |
 | `P` | Save stats to file |
 
