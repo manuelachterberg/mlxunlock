@@ -33,6 +33,7 @@ SERVER_MAX_TOKENS = os.environ.get("SERVER_MAX_TOKENS", "8192")
 _lock = threading.Lock()
 _proc: subprocess.Popen | None = None
 _last_hit = 0.0
+_active = 0            # laufende Requests — Modell entlaedt nie mid-request
 
 
 def log(msg: str) -> None:
@@ -85,6 +86,8 @@ def _ensure_server() -> None:
 def _idle_watch() -> None:
     while True:
         time.sleep(5)
+        if _active > 0:          # Request laeuft noch — nicht entladen
+            continue
         with _lock:
             if _proc and _proc.poll() is None and time.time() - _last_hit > IDLE_TIMEOUT:
                 log(f"Idle > {IDLE_TIMEOUT}s — Modell entladen, RAM frei.")
@@ -92,12 +95,18 @@ def _idle_watch() -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"    # noetig fuer Chunked-Transfer (SSE)
+
     def _send(self, code: int, payload: bytes) -> None:
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
+
+    def _send_chunk(self, payload: bytes) -> None:
+        self.wfile.write(("%x\r\n" % len(payload)).encode() + payload + b"\r\n")
+        self.wfile.flush()
 
     def do_GET(self):
         if self.path.rstrip("/") == "/v1/models":
@@ -117,22 +126,51 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, b'{"error":"bad json"}')
             return
         body["model"] = MODEL          # Router-ID -> echten Pfad ersetzen
-        body.pop("stream", None)       # non-streaming an den inneren Server
+        # stream=True MUSS als SSE (text/event-stream) durchgereicht werden —
+        # Hermes liest Compaction-Antworten als Stream; normal JSON => leerer Inhalt.
+        stream = bool(body.get("stream", False))
         # Qwen3 wuerde max_tokens in "reasoning" verbrennen und content leer lassen.
         ctk = body.get("chat_template_kwargs") or {}
         ctk.setdefault("enable_thinking", False)
         body["chat_template_kwargs"] = ctk
+        global _active
+        _active += 1
+        headers_sent = False
         try:
             _ensure_server()
             req = urllib.request.Request(
                 f"http://127.0.0.1:{INNER_PORT}/v1/chat/completions",
                 data=json.dumps(body).encode(),
                 headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=900) as r:
-                self._send(r.status, r.read())
+            with urllib.request.urlopen(req, timeout=1800) as r:
+                if stream:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Transfer-Encoding", "chunked")
+                    self.end_headers()
+                    headers_sent = True
+                    read = getattr(r, "read1", None) or (lambda n: r.read(1))
+                    while True:
+                        chunk = read(65536)
+                        if not chunk:
+                            break
+                        self._send_chunk(chunk)
+                    self.wfile.write(b"0\r\n\r\n")
+                    self.wfile.flush()
+                else:
+                    self._send(r.status, r.read())
         except Exception as e:  # noqa: BLE001 — Endpoint soll antworten, nie haengen
             log(f"FEHLER: {e}")
-            self._send(502, json.dumps({"error": str(e)}).encode())
+            if not headers_sent:
+                try:
+                    self._send(502, json.dumps({"error": str(e)}).encode())
+                except OSError:
+                    pass
+        finally:
+            global _last_hit
+            _last_hit = time.time()
+            _active -= 1
 
     def log_message(self, format, *args):  # Request-Zeilen stumm, eigene log() reicht
         pass
