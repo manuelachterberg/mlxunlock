@@ -1,5 +1,7 @@
 import os
 import mlx.core as mx
+
+os.makedirs(os.environ.setdefault("HF_HUB_CACHE", os.path.expanduser("~/.cache/huggingface/hub")), exist_ok=True)
 mx.set_memory_limit(int(os.environ.get("PRIMARY_MEMORY_LIMIT", str(20 * 1024**3))))
 
 import sys

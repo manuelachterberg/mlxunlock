@@ -4,6 +4,7 @@ import mlx.core as mx
 # Allow dashboard to override memory limit via env var; default 12 GB for fallback.
 FALLBACK_MEMORY_LIMIT = int(os.environ.get("FALLBACK_MEMORY_LIMIT", str(12 * 1024**3)))
 mx.set_memory_limit(FALLBACK_MEMORY_LIMIT)
+os.makedirs(os.environ.setdefault("HF_HUB_CACHE", os.path.expanduser("~/.cache/huggingface/hub")), exist_ok=True)
 
 import sys
 

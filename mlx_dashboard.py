@@ -725,7 +725,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if PROXY_STATE.routing_mode == "PRIMARY":
                 if check_backend_available(PRIMARY_PORT, "/v1/models"):
                     PROXY_STATE.active_backend = "27B"
-                    PROXY_STATE.routing_reason = "27B direct"
+                    PROXY_STATE.routing_reason = "Primary direct"
                     PROXY_STATE.total_routed_27b += 1
                     return PRIMARY_PORT, PROXY_STATE.routing_reason
             elif PROXY_STATE.routing_mode == "FALLBACK":
@@ -765,12 +765,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
             if not PROXY_STATE.primary_healthy:
                 PROXY_STATE.active_backend = "FALLBACK"
-                PROXY_STATE.routing_reason = "27B crashed/unhealthy"
+                PROXY_STATE.routing_reason = "Primary crashed/unhealthy"
                 PROXY_STATE.total_routed_fallback += 1
                 return FALLBACK_PORT, PROXY_STATE.routing_reason
 
             PROXY_STATE.active_backend = "27B"
-            PROXY_STATE.routing_reason = str(estimated_tokens) + "t < " + str(TOKEN_LIMIT_27B) + "t, healthy"
+            PROXY_STATE.routing_reason = str(estimated_tokens) + "t < " + str(TOKEN_LIMIT_27B) + "t, primary healthy"
             PROXY_STATE.total_routed_27b += 1
             return PRIMARY_PORT, PROXY_STATE.routing_reason
 
